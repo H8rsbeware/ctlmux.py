@@ -1,4 +1,4 @@
-# ctlmux
+# ctlmux - idea
 
 Ctlmux is a simple recover tool that:
 - Builds a toml file to reconstruct your current tmux session, with `ctlmux new {tmux-session}`
