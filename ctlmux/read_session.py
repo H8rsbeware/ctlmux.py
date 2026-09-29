@@ -174,7 +174,7 @@ def GetPanes(session_name: str) -> list[FormatPaneOut]:
         line = line.decode().strip()
 
         if not line.startswith(expected_start):
-            pass
+            continue
 
         fmt_panes.append(
             parsePane(line)
