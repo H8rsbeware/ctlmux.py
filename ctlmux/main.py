@@ -1,11 +1,13 @@
 # !/usr/bin/python
-import subprocess as sub
-import sys
+# import subprocess as sub
+# import sys
 
+from read_session import BuildSessionState
 
 def main() -> None:
-    _ = sys
-    _ = sub
+    state_name: str | None = BuildSessionState(None)
+    print(state_name)
+
     return
 
 
