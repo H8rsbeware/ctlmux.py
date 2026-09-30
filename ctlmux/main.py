@@ -2,7 +2,7 @@
 # import subprocess as sub
 # import sys
 
-from read_session import BuildSessionState
+from read.read_session import BuildSessionState
 
 def main() -> None:
     state_name: str | None = BuildSessionState(None)
