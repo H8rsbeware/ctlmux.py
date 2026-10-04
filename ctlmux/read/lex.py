@@ -1,18 +1,19 @@
-"""
+""" !!! Added frame, need to fix - see the dotfiles/buffer.py|nvim.md
+
 Format of TMUX window layout, where:
     - AREA: defines a stack or list of many pains, and its base size 
         (as compared to its parent)
     - PANE: literal definition of a pane, it size, and id
 
-5ba6,308x70,0,0[                // TOP LEVEL DEF (PANE OR AREA)
-    308x35,0,0,2,               // PANE DEFINITION
-    308x34,0,36{                // AREA DEFINITION
-        154x34,0,36,3,          // PANE
-        153x34,155,36[          // AREA
-            153x17,155,36,4,    // PANE
-            153x16,155,54{      // AREA
-                76x16,155,54,8, // PANE
-                76x16,232,54,9  // PANE
+5ba6,308x70,0,0[                // top level def (pane or area)
+    308x35,0,0,2,               // pane definition
+    308x34,0,36{                // area definition
+        154x34,0,36,3,          // pane
+        153x34,155,36[          // area
+            153x17,155,36,4,    // pane
+            153x16,155,54{      // area
+                76x16,155,54,8, // pane
+                76x16,232,54,9  // pane
             }
         ]
     }
@@ -39,16 +40,22 @@ If I wrote this again, id do a few things:
     3. Dont use python, I can tell this tree will be slow af, and i have to crawl
         it again!
 """
-from . import tokenise as tkn
+import tokenise as tkn
 from dataclasses import dataclass
 from enum import Enum
-from typing import Self
+from typing import Self, override
 
 import math
 
 
 class CTLMUX_LexError(Exception):
     pass
+
+
+@dataclass()
+class PaneContainerSyntax:
+    open: str
+    close: str
 
 
 class PaneType(Enum):
@@ -63,17 +70,28 @@ class PaneItem:
     width_perc: int
     height_perc: int
 
+    @override
+    def __repr__(self):
+        return f"[{self.pane_id}: {self.width_perc}x{self.height_perc} (%)]"
+
 
 @dataclass()
 class PaneArea:
     children: list[PaneItem | Self]
     area_type: PaneType
 
+    @override
+    def __repr__(self):
+        return f"[{self.area_type}]:\n" + "\n".join([
+            child.__repr__() for child in self.children
+        ])
+
 
 @dataclass()
-class PaneContainerSyntax:
-    open: str
-    close: str
+class Frame:
+    size: tuple[int, int]
+    last_char: str
+    pane_id: str | None
 
 
 class Lexer:
@@ -102,38 +120,45 @@ class Lexer:
         _ = self.tokeniser.consume_until(',')  # checksum
         _ = self.tokeniser.advance()  # consume comma
 
-        _ = self.tokeniser.consume_until(',')
+        size, _ = self.tokeniser.consume_until(',')
+        size = self.create_size(size)
         _ = self.tokeniser.advance()  # consume comma
+        if size is None:
+            raise CTLMUX_LexError(
+                "Top Level size is formatted incorrectly"
+            )
 
         _ = self.tokeniser.consume_until(',')  # x align
         _ = self.tokeniser.advance()  # consume comma
 
-        _ = self.tokeniser.consume_until(',')  # y align
-        _ = self.tokeniser.advance()  # consume comma
+        next_of_interest = self.closestCharacter('*')
+        if next_of_interest == '*':
+            raise CTLMUX_LexError(
+                "Top level isnt a single pain or termiated with a group operator"
+            )
 
-        next_brace = self.tokeniser.find_next('{') or math.inf
-        next_bracket = self.tokeniser.find_next('[') or math.inf
+        if next_of_interest == ',':
+            # consume y align
+            _ = self.tokeniser.consume_until(',')  # y align
+            _ = self.tokeniser.advance()  # consume comma
 
-        if (
-            next_brace is math.inf
-            and next_bracket is math.inf
-        ):
-            # must be a single pane, which is terminated by eof
+            # then consume the pane, since this defines one
             pane_id, _ = self.tokeniser.consume_until(' ')
             self.pane_tree.children.append(
-                PaneItem(pane_id, 100, 100)
+                PaneItem(pane_id, size[0], size[1])
             )
             return self.pane_tree
 
-        area_type = PaneType.LIST if next_brace < next_bracket else PaneType.STACK
+        area_type = PaneType.LIST if next_of_interest == '{'else PaneType.STACK
         open_syntax = self.getContainerSyntax(area_type).open
 
         # eat bracket/brace to be consistent with later processes
+        # y align consumed
         _ = self.tokeniser.consume_until(open_syntax)
-        _ = self.tokeniser.advance()
+        last_ch, _ = self.tokeniser.advance()
 
         # ratio doesnt matter, since we work in percentages
-        final_area = self.consumeArea((100, 100), area_type)
+        final_area,  _ = self.consumeArea(size, area_type, last_ch)
         self.pane_tree.children.append(final_area)
 
         return self.pane_tree
@@ -154,14 +179,23 @@ class Lexer:
             stack_open
         ) or math.inf
 
+        next_end = self.tokeniser.find_next(
+            end_inside_char
+        ) or math.inf
+
         closest = min(
             next_comma,
-            list_open,
-            stack_open,
-            -1
+            next_list,
+            next_stack,
+            next_end,
         )
 
-        if closest == -1:
+        if closest == math.inf:
+            raise CTLMUX_LexError(
+                "no next closest char matches"
+            )
+
+        if closest == next_end:
             return end_inside_char
         if closest == next_comma:
             return ','
@@ -174,8 +208,8 @@ class Lexer:
 
     def consumePaneOrArea(
         self,
-        inside: PaneType
-    ) -> tuple[tuple[int, int], str, str | None]:
+        inside: PaneType,
+    ) -> Frame:
         """
         Consumes either 3 or 4 comma seperated values, where 0 is the ratio
         and 4, if it exists, is an id for the pane.
@@ -186,6 +220,7 @@ class Lexer:
         Returns the ratio, last consumed char ['[', '{', ',' '}', ']'], and the
         pane id, if one exists, or None
         """
+
         area_close_syntax = self.getContainerSyntax(inside).close
 
         size, _ = self.tokeniser.consume_until(',')
@@ -203,20 +238,21 @@ class Lexer:
         if to_consume == ',':
             _ = self.tokeniser.consume_until(',') # align y
             _ = self.tokeniser.advance()
-
+            
             comma_or_inside = self.closestCharacter(
                 area_close_syntax
             )
 
-            if comma_or_inside != ',' or comma_or_inside != area_close_syntax:
+            if comma_or_inside != ',' and comma_or_inside != area_close_syntax:
                 raise CTLMUX_LexError(
                     "consumePaneOrArea expects Pane (ends comma or `}`/`]`.)" +
                     f"found: `{comma_or_inside}`"
                 )
 
             id, _ = self.tokeniser.consume_until(comma_or_inside)
-            _ = self.tokeniser.advance()
-            return size, comma_or_inside, id
+            consumed, _ = self.tokeniser.advance()
+
+            return Frame(size, consumed, id)
 
         # if `inside_terminator` is 3rd something is broken - 
         # we expect panes to be 4 long, and areas to be 3 + { or [
@@ -227,56 +263,55 @@ class Lexer:
 
         # otherwise, we can consume one and return
         _ = self.tokeniser.consume_until(to_consume)
-        _ = self.tokeniser.advance()
+        consumed, _ = self.tokeniser.advance()
 
-        return size, to_consume, None
+        return Frame(size, consumed, None)
 
-    def consumeArea(self, start_size: tuple[int, int], inside: PaneType) -> PaneArea:
+    def consumeArea(self, start_size: tuple[int, int], inside: PaneType, last_seen: str = '') -> tuple[PaneArea, str]:
         AREA_SYNTAX = self.getContainerSyntax(inside)
-        this_pa = PaneArea(area_type=PaneType.LIST, children=[])
+        this_pa = PaneArea(area_type=inside, children=[])
+        lc = last_seen if last_seen != '' else self.tokeniser.peek()[0]
 
-        lc = None
         while lc != AREA_SYNTAX.close:
-            this_size, last_consumed, id_or_none = self.consumePaneOrArea(
-                PaneType.LIST
+            frame = self.consumePaneOrArea(
+                inside
             )
 
-            if last_consumed == ',':
-                if id_or_none is None:
-                    raise CTLMUX_LexError(
-                        "consumeList found ',' last, but no id returned"
-                    )
+            if frame.pane_id:
                 perc_size = self.calculate_proportional_size(
                     start_size,
-                    this_size
+                    frame.size
                 )
 
                 this_pa.children.append(
                     PaneItem(
-                        id_or_none,
+                        frame.pane_id,
                         perc_size[0],
                         perc_size[1],
                     )
                 )
-            else:
+
+            if frame.last_char in ['{', '[']:
                 next_type = PaneType.LIST \
-                    if last_consumed == self.getContainerSyntax(PaneType.LIST).open \
+                    if frame.last_char == self.getContainerSyntax(PaneType.LIST).open \
                     else PaneType.STACK
 
-                this_pa.children.append(
-                    self.consumeArea(
-                        (100, 100),
-                        next_type
-                    )
+                tpane, last_ch = self.consumeArea(
+                    frame.size,
+                    next_type,
+                    frame.last_char,
                 )
-
-            lc = last_consumed
-
-        return this_pa
+                this_pa.children.append(tpane)
+                lc = last_ch
+            elif frame.pane_id:
+                lc = frame.last_char
+       
+        lc, _ = self.tokeniser.advance()
+        return this_pa, lc 
 
     @staticmethod
     def create_size(size: str) -> tuple[int, int] | None:
-        x, y = size.split('x', 1)
+        x, y = size.split('x')
         x = int(x) or None
         y = int(y) or None
 
@@ -311,3 +346,16 @@ class Lexer:
             "TOP_LEVEL has no PaneContainerSyntax, since it defines no areas"
         )
 
+
+if __name__ == "__main__":
+    s = "5ba6,308x70,0,0[308x35,0,0,2,308x34,0,36{154x34,0,36,3,153x34,155,36[153x17,155,36,4,153x16,155,54{76x16,155,54,8,76x16,232,54,9}]}]"
+    x = Lexer(s)
+    a = x.Build()
+    print(a)
+
+    print("--------")
+
+    s = "b693,308x70,0,0{154x70,0,0[154x35,0,0,1,154x34,0,36,5],76x70,155,0,2,76x70,232,0[76x35,232,0,3,76x34,232,36,4]}"
+    x = Lexer(buffer=s)
+    a = x.Build()
+    print(a)
