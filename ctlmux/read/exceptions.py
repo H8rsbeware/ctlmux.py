@@ -1,4 +1,8 @@
 
+class CTLMUX_TMUXPaneFormatInvalid(Exception):
+    pass
+
+
 class CTLMUX_TMUXCmdFailed(Exception):
     pass
 
