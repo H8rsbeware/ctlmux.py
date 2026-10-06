@@ -2,11 +2,15 @@
 # import subprocess as sub
 # import sys
 
-from read.read_session import BuildSessionState
+from read.layout_collector import WindowsTree
 
 def main() -> None:
-    state_name: str | None = BuildSessionState(None)
-    print(state_name)
+    tree_builder = WindowsTree("test")
+    windows = tree_builder.Build();
+    
+    for win in windows:
+        print(win)
+        print("\n------\n")
 
     return
 

@@ -40,7 +40,7 @@ If I wrote this again, id do a few things:
     3. Dont use python, I can tell this tree will be slow af, and i have to crawl
         it again!
 """
-import tokenise as tkn
+from . import tokenise as tkn
 from dataclasses import dataclass
 from enum import Enum
 from typing import Self, override
