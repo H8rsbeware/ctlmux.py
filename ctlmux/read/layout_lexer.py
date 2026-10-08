@@ -40,16 +40,12 @@ If I wrote this again, id do a few things:
     3. Dont use python, I can tell this tree will be slow af, and i have to crawl
         it again!
 """
-from . import tokenise as tkn
 from dataclasses import dataclass
-from enum import Enum
-from typing import Self, override
-
 import math
 
-
-class CTLMUX_LexError(Exception):
-    pass
+from . import tokenise as tkn
+from .types import LayoutPaneItem, LayoutPaneArea, LayoutPaneType
+from .exceptions import CTLMUX_LexError
 
 
 @dataclass()
@@ -58,42 +54,8 @@ class PaneContainerSyntax:
     close: str
 
 
-class PaneType(Enum):
-    TOP_LEVEL = 0
-    STACK = 1
-    LIST = 2
-
-
 @dataclass()
-class PaneItem:
-    pane_id: str
-    width_perc: int
-    height_perc: int
-
-    @override
-    def __repr__(self, depth: int = 0):
-        return ''.join(
-            ['\t' for _ in range(0, depth)
-        ]) + f"[{self.pane_id}: {self.width_perc}x{self.height_perc} (%)]"
-
-
-@dataclass()
-class PaneArea:
-    children: list[PaneItem | Self]
-    area_type: PaneType
-    width_perc: int
-    height_perc: int
-
-    @override
-    def __repr__(self, depth: int = 0):
-        tabs = ''.join(['\t' for _ in range(0, depth)]) 
-        return  f"{tabs}[{self.area_type}: {self.width_perc}x{self.height_perc}]:\n" + '\n'.join([
-            child.__repr__(depth + 1) for child in self.children
-        ])
-
-
-@dataclass()
-class Frame:
+class RollingWindow:
     size: tuple[int, int]
     last_char: str
     pane_id: str | None
@@ -103,9 +65,9 @@ class Lexer:
     def __init__(self, buffer: str):
         self.tokeniser: tkn.Tokenise = tkn.Tokenise(buffer)
 
-        self.pane_tree: PaneArea = PaneArea([], PaneType.TOP_LEVEL, 100, 100)
+        self.pane_tree: LayoutPaneArea = LayoutPaneArea([], LayoutPaneType.TOP_LEVEL, 100, 100)
 
-    def Build(self) -> PaneArea:
+    def Build(self) -> LayoutPaneArea:
         """
         Consumes the top-level window data (checksum, alignment, size, etc),
         and then either:
@@ -150,11 +112,11 @@ class Lexer:
             # then consume the pane, since this defines one
             pane_id, _ = self.tokeniser.consume_until(' ')
             self.pane_tree.children.append(
-                PaneItem(pane_id, size[0], size[1])
+                LayoutPaneItem(pane_id, size[0], size[1])
             )
             return self.pane_tree
 
-        area_type = PaneType.LIST if next_of_interest == '{'else PaneType.STACK
+        area_type = LayoutPaneType.LIST if next_of_interest == '{'else LayoutPaneType.STACK
         open_syntax = Lexer.get_container_syntax(area_type).open
 
         # eat bracket/brace to be consistent with later processes
@@ -170,8 +132,8 @@ class Lexer:
         return self.pane_tree
 
     def closestCharacter(self, end_inside_char: str):
-        list_open = Lexer.get_container_syntax(PaneType.LIST).open
-        stack_open = Lexer.get_container_syntax(PaneType.STACK).open
+        list_open = Lexer.get_container_syntax(LayoutPaneType.LIST).open
+        stack_open = Lexer.get_container_syntax(LayoutPaneType.STACK).open
 
         next_comma = self.tokeniser.find_next(
             ','
@@ -214,8 +176,8 @@ class Lexer:
 
     def consumePaneOrArea(
         self,
-        inside: PaneType,
-    ) -> Frame:
+        inside: LayoutPaneType,
+    ) -> RollingWindow:
         """
         Consumes either 3 or 4 comma seperated values, where 0 is the ratio
         and 4, if it exists, is an id for the pane.
@@ -258,7 +220,7 @@ class Lexer:
             id, _ = self.tokeniser.consume_until(comma_or_inside)
             consumed, _ = self.tokeniser.advance()
 
-            return Frame(size, consumed, id)
+            return RollingWindow(size, consumed, id)
 
         # if `inside_terminator` is 3rd something is broken - 
         # we expect panes to be 4 long, and areas to be 3 + { or [
@@ -271,11 +233,11 @@ class Lexer:
         _ = self.tokeniser.consume_until(to_consume)
         consumed, _ = self.tokeniser.advance()
 
-        return Frame(size, consumed, None)
+        return RollingWindow(size, consumed, None)
 
-    def consumeArea(self, start_size: tuple[int, int], inside: PaneType, last_seen: str = '') -> tuple[PaneArea, str]:
+    def consumeArea(self, start_size: tuple[int, int], inside: LayoutPaneType, last_seen: str = '') -> tuple[LayoutPaneArea, str]:
         AREA_SYNTAX = Lexer.get_container_syntax(inside)
-        this_pa = PaneArea([], inside, start_size[0], start_size[1])
+        this_pa = LayoutPaneArea([], inside, start_size[0], start_size[1])
         lc = last_seen if last_seen != '' else self.tokeniser.peek()[0]
         
         total_od = 0
@@ -291,18 +253,18 @@ class Lexer:
                 )
 
                 this_pa.children.append(
-                    PaneItem(
+                    LayoutPaneItem(
                         frame.pane_id,
                         perc_size[0],
                         perc_size[1],
                     )
                 )
-                total_od += perc_size[0] if inside == PaneType.LIST else perc_size[1]
+                total_od += perc_size[0] if inside == LayoutPaneType.LIST else perc_size[1]
 
             if frame.last_char in ['{', '[']:
-                next_type = PaneType.LIST \
-                    if frame.last_char == Lexer.get_container_syntax(PaneType.LIST).open \
-                    else PaneType.STACK
+                next_type = LayoutPaneType.LIST \
+                    if frame.last_char == Lexer.get_container_syntax(LayoutPaneType.LIST).open \
+                    else LayoutPaneType.STACK
 
                 tpane, last_ch = self.consumeArea(
                     frame.size,
@@ -346,10 +308,10 @@ class Lexer:
         return int(px), int(py)
 
     @staticmethod
-    def get_container_syntax(t: PaneType) -> PaneContainerSyntax:
-        if t == PaneType.LIST:
+    def get_container_syntax(t: LayoutPaneType) -> PaneContainerSyntax:
+        if t == LayoutPaneType.LIST:
             return PaneContainerSyntax('{', '}')
-        if t == PaneType.STACK:
+        if t == LayoutPaneType.STACK:
             return PaneContainerSyntax('[', "]")
 
         raise CTLMUX_LexError(
@@ -357,7 +319,7 @@ class Lexer:
         )
 
     @staticmethod
-    def post_scale_children(pa: PaneArea) -> None:
+    def post_scale_children(pa: LayoutPaneArea) -> None:
         """Convert raw area sizes and pane percentages into parent-relative shares.
 
         Run once on the completed tree, while area dimensions are still raw.
@@ -366,7 +328,7 @@ class Lexer:
         if not pa.children:
             return
 
-        horizontal = pa.area_type == PaneType.LIST
+        horizontal = pa.area_type == LayoutPaneType.LIST
         parent_dimension = pa.width_perc if horizontal else pa.height_perc
         weights: list[int] = []
 
@@ -374,7 +336,7 @@ class Lexer:
             dimension = child.width_perc if horizontal else child.height_perc
             # Scale the PAs and PIs to be the same. Parent and PA dimensions 
             # are real widths while their multipliers are percentages.
-            if isinstance(child, PaneArea):
+            if isinstance(child, LayoutPaneArea):
                 weights.append(dimension * 100)
             else:
                 weights.append(dimension * parent_dimension)
@@ -399,7 +361,7 @@ class Lexer:
         # For each child, share pair, apply the share to the main-axis of this
         # container type (x for list, y for stack). 
         for child, share in zip(pa.children, shares):
-            if isinstance(child, PaneArea):
+            if isinstance(child, LayoutPaneArea):
                 # Children need raw dimensions for scaling so we apply first.
                 Lexer.post_scale_children(child)
 

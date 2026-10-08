@@ -1,3 +1,7 @@
+"""
+
+"""
+
 from dataclasses import dataclass
 from typing import override, Self
 from enum import IntEnum
@@ -5,26 +9,13 @@ from enum import IntEnum
 import subprocess as sub
 
 from . import exceptions as exc
-from . import lex
-
-TMUX_SESSION_KEY = "session"
-TMUX_PANE_FORMAT = "'" + TMUX_SESSION_KEY + \
-    "=#{session_name} pane_id=#{pane_id} " + \
-    "window=#{window_index}:#{window_name} " + \
-    "pane=#{pane_index}:#{pane_title} active=#{pane_active} " + \
-    "command=#{pane_current_command} path=#{pane_current_path}'"
-TMUX_PANE_FIELD_COUNT = TMUX_PANE_FORMAT.count('=')
-
-TMUX_WINDOW_FORMAT = "'" + TMUX_SESSION_KEY + \
-    "=#{session_name} window=#{window_index}:#{window_name} " + \
-    "count=#{window_panes} layout=#{window_layout}'"
-TMUX_WINDOW_FIELD_COUNT = TMUX_WINDOW_FORMAT.count('=')
+from . import layout_lexer as lex
+from shared_types import SerialisedTMUXTypes as stypes
+from tmux_formats import TMUX_SESSION_KEY, TMUX_PANE_FORMAT, TMUX_PANE_FIELD_COUNT, TMUX_WINDOW_FORMAT, TMUX_WINDOW_FIELD_COUNT
+from .types import LayoutPaneArea, LayoutPaneType
 
 WindowInfo = dict[str, str]
 PaneInfo = dict[str, str]
-
-SerialisedPaneInfo = dict[str, str | int | bool | list[int]]
-SerialisedWindowInfo = dict[str, str | list[int | int] | SerialisedPaneInfo]
 
 
 class AreaType(IntEnum):
@@ -33,7 +24,7 @@ class AreaType(IntEnum):
     LIST = 2 # horizontal
 
     @staticmethod
-    def fromLexPaneType(pane_type: lex.PaneType) -> "AreaType":
+    def fromLexPaneType(pane_type: LayoutPaneType) -> "AreaType":
         return AreaType(pane_type.value)
 
     @override
@@ -46,7 +37,7 @@ class AreaType(IntEnum):
 
 
 @dataclass
-class ResolvedPane:
+class ResolvedTMUXPane:
     id: int
     index: int
     title: str
@@ -63,7 +54,7 @@ class ResolvedPane:
             f"{self.command} ({self.relative_dimensions[0]}," + \
             f"{self.relative_dimensions[1]} | active: {self.active})]\n"
 
-    def dict(self) -> SerialisedPaneInfo:
+    def dict(self) -> stypes.SerialisedPaneInfo:
         return {
             "id": self.id,
             "index": self.index,
@@ -79,10 +70,10 @@ class ResolvedPane:
 
 
 @dataclass
-class ResolvedArea:
+class ResolvedTMUXArea:
     type: AreaType
     relative_dimensions: tuple[int, int]
-    children: list[ResolvedPane | Self]
+    children: list[ResolvedTMUXPane | Self]
 
     @override
     def __repr__(self, depth: int = 0):
@@ -95,7 +86,7 @@ class ResolvedArea:
             [c.__repr__(depth+1) for c in self.children]
         ) + '\n'
 
-    def dict(self) -> SerialisedWindowInfo:
+    def dict(self) -> stypes.SerialisedWindowInfo:
         children = [child.dict() for child in self.children]
 
         return {
@@ -108,13 +99,12 @@ class ResolvedArea:
         }
 
 
-
 @dataclass
-class Window:
+class TMUXWindow:
     index: int
     session_name: str
     name: str
-    pane_tree: ResolvedArea
+    pane_tree: ResolvedTMUXArea
 
     @override
     def __repr__(self, depth: int = 0):
@@ -124,13 +114,21 @@ class Window:
 
         return base + self.pane_tree.__repr__(depth+1) + '\n'
 
+    def dict(self) -> dict[str, str | int | stypes.SerialisedWindowInfo]:
+        return {
+            "window_index": self.index,
+            "window_name": self.name,
+            "session_name": self.session_name,
+            "panes": self.pane_tree.dict(),
+        }
+
 
 class WindowsTree:
     def __init__(self, session_name: str):
-        self.tree: list[Window] = []
+        self.tree: list[TMUXWindow] = []
         self.session_name: str = session_name
 
-    def Build(self) -> list[Window]:
+    def Build(self) -> list[TMUXWindow]:
         try:
             winfo = self.getWindowInfos()
         except exc.CTLMUX_TMUXCmdFailed as e:
@@ -155,13 +153,13 @@ class WindowsTree:
             tree = lxr.Build()
 
             # Walk tree with windex, get pane data, build new tree
-            this_tl_pane: ResolvedArea = self.BuildTopPaneFromLayoutTree(
+            this_tl_pane: ResolvedTMUXArea = self.BuildTopPaneFromLayoutTree(
                 tree,
                 expected_pane_count,
                 windex,
             )
 
-            this_window = Window(
+            this_window = TMUXWindow(
                 windex,
                 self.session_name,
                 data["_window_name"],
@@ -174,19 +172,19 @@ class WindowsTree:
 
     def BuildTopPaneFromLayoutTree(
         self,
-        layout_tree: lex.PaneArea,
+        layout_tree: LayoutPaneArea,
         expected_pane_count: int,
         index: int,
-    ) -> ResolvedArea:
+    ) -> ResolvedTMUXArea:
         panes_by_id = self.getPaneInfos(index)
 
-        def walk(node: lex.PaneArea, count: int = 0) -> tuple[ResolvedArea, int]:
-            children: list[ResolvedArea | ResolvedPane] = []
+        def walk(node: LayoutPaneArea, count: int = 0) -> tuple[ResolvedTMUXArea, int]:
+            children: list[ResolvedTMUXArea | ResolvedTMUXPane] = []
             node_type = AreaType.fromLexPaneType(node.area_type)
 
             for child in node.children:
                 this = None
-                if isinstance(child, lex.PaneArea):
+                if isinstance(child, LayoutPaneArea):
                     this, c = walk(child, count)
                     count = c
                 else:
@@ -203,7 +201,7 @@ class WindowsTree:
                     active: bool = True if this_pane["active"] == '1' else False
 
                     # get all this shit
-                    this = ResolvedPane(
+                    this = ResolvedTMUXPane(
                         index,
                         pane_int,
                         this_pane["_pane_title"],
@@ -217,7 +215,7 @@ class WindowsTree:
                 # account for area or panes existance
                 children.append(this)
 
-            return ResolvedArea(
+            return ResolvedTMUXArea(
                 node_type,
                 (node.width_perc, node.height_perc),
                 children,

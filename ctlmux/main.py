@@ -2,7 +2,7 @@
 # import subprocess as sub
 # import sys
 
-from read.layout_collector import WindowsTree
+from read.window_builder import WindowsTree
 
 def main() -> None:
     tree_builder = WindowsTree("test")
