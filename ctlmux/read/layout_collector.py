@@ -23,6 +23,9 @@ TMUX_WINDOW_FIELD_COUNT = TMUX_WINDOW_FORMAT.count('=')
 WindowInfo = dict[str, str]
 PaneInfo = dict[str, str]
 
+SerialisedPaneInfo = dict[str, str | int | bool | list[int]]
+SerialisedWindowInfo = dict[str, str | list[int | int] | SerialisedPaneInfo]
+
 
 class AreaType(IntEnum):
     TOP = 0 # no defined
@@ -32,6 +35,14 @@ class AreaType(IntEnum):
     @staticmethod
     def fromLexPaneType(pane_type: lex.PaneType) -> "AreaType":
         return AreaType(pane_type.value)
+
+    @override
+    def __str__(self) -> str:
+        return {
+            0: "TOP",
+            1: "STACK",
+            2: "LIST",
+        }[self]
 
 
 @dataclass
@@ -48,9 +59,23 @@ class ResolvedPane:
     def __repr__(self, depth: int = 0):
         tabs = '\t'.join(['' for _ in range(depth)])
 
-        return f"{tabs}P[{self.title}:{self.id} | {self.path} -> " + \
-        f"{self.command} ({self.relative_dimensions[0]}," + \
-        f"{self.relative_dimensions[1]} | active: {self.active})]\n"
+        return f"{tabs}P[{self.title}:{self.id}@{self.index} | {self.path} -> " + \
+            f"{self.command} ({self.relative_dimensions[0]}," + \
+            f"{self.relative_dimensions[1]} | active: {self.active})]\n"
+
+    def dict(self) -> SerialisedPaneInfo:
+        return {
+            "id": self.id,
+            "index": self.index,
+            "title": self.title,
+            "active": self.active,
+            "command": self.command,
+            "path": self.path,
+            "relative_dimensions": [
+                self.relative_dimensions[0],
+                self.relative_dimensions[1],
+            ]
+        }
 
 
 @dataclass
@@ -64,9 +89,25 @@ class ResolvedArea:
         tabs = '\t'.join(['' for _ in range(depth)])
 
         base = f"{tabs}A[{self.type}, ({self.relative_dimensions[0]}," + \
-        f"{self.relative_dimensions[1]})] -> \n"
-            
-        return base + ''.join([c.__repr__(depth+1) for c in self.children]) + '\n'
+            f"{self.relative_dimensions[1]})] -> \n"
+
+        return base + ''.join(
+            [c.__repr__(depth+1) for c in self.children]
+        ) + '\n'
+
+    def dict(self) -> SerialisedWindowInfo:
+        children = [child.dict() for child in self.children]
+
+        return {
+            "type": str(self.type),
+            "relative_dimensions": [
+                self.relative_dimensions[0],
+                self.relative_dimensions[1],
+            ],
+            "children": children
+        }
+
+
 
 @dataclass
 class Window:
@@ -80,7 +121,7 @@ class Window:
         tabs = '\t'.join(['' for _ in range(depth)])
 
         base = f"{tabs}WIN[{self.index}:{self.session_name} -> {self.name}]\n"
-            
+
         return base + self.pane_tree.__repr__(depth+1) + '\n'
 
 
@@ -90,7 +131,14 @@ class WindowsTree:
         self.session_name: str = session_name
 
     def Build(self) -> list[Window]:
-        winfo = self.getWindowInfos()
+        try:
+            winfo = self.getWindowInfos()
+        except exc.CTLMUX_TMUXCmdFailed as e:
+            print(
+                "\x1b[31mCannot get window information for: " +
+                f"'{self.session_name}'.\x1b[0m"
+            )
+            raise e
 
         for windex, data in winfo.items():
             layout: str | None = data.get("layout", None)
@@ -139,8 +187,8 @@ class WindowsTree:
             for child in node.children:
                 this = None
                 if isinstance(child, lex.PaneArea):
-                    this, _ = walk(child, count)
-                    count += len(this.children)
+                    this, c = walk(child, count)
+                    count = c
                 else:
                     pane_id = child.pane_id
                     pane_int = int(pane_id) or -1
@@ -164,9 +212,9 @@ class WindowsTree:
                         this_pane["path"],
                         (child.width_perc, child.height_perc)
                     )
-                
+                    count += 1
+
                 # account for area or panes existance
-                count += 1 
                 children.append(this)
 
             return ResolvedArea(
@@ -176,13 +224,12 @@ class WindowsTree:
             ), count
 
         area, count = walk(layout_tree, 0)
-        # TODO: appears that expected_count is 1 off?
 
-        # if expected_count != count:
-        #     raise exc.CTLMUX_SystemError(
-        #         "BuildWindowFromLayoutTree child mismatch, Lex produced " +
-        #         f"`{expected_count}` children, walked {count}"
-        #     )
+        if expected_count != count:
+            raise exc.CTLMUX_SystemError(
+                "BuildWindowFromLayoutTree child mismatch, Lex produced " +
+                f"`{expected_count}` children, walked {count}"
+            )
 
         return area
 
@@ -201,24 +248,24 @@ class WindowsTree:
             )
 
         expected_start = TMUX_SESSION_KEY + "=" + self.session_name
-        pinfo: dict[int, PaneInfo] = {}
+        all_panes_by_id: dict[int, PaneInfo] = {}
 
         for line in result.splitlines():
             fmt = line.decode().strip()
             if fmt.startswith(expected_start) is False:
                 continue
 
-            pi, index = WindowsTree.parse_tmux_pane(fmt)
+            pane_info, pane_id = WindowsTree.parse_tmux_pane(fmt)
 
-            if pinfo.get(index, None) is not None:
+            if all_panes_by_id.get(pane_id, None) is not None:
                 raise exc.CTLMUX_WindowLayoutInvalid(
                     "list-windows retuned multiple of the same window_index " +
                     "for a single session name"
                 )
 
-            pinfo[index] = pi
+            all_panes_by_id[pane_id] = pane_info
 
-        return pinfo
+        return all_panes_by_id
 
     def getWindowInfos(self) -> dict[int, WindowInfo]:
         try:
@@ -282,6 +329,17 @@ class WindowsTree:
             )
         index, name = split_window
 
+        pane_id = found.get("pane_id", "")
+        if pane_id.startswith('%'):
+            pane_id = pane_id.removeprefix('%')
+
+        pane_id_int = int(pane_id) or None
+
+        if not pane_id_int:
+            raise exc.CTLMUX_TMUXPaneFormatInvalid(
+                "list-panes `pane_id` must be set, and int convertable"
+            )
+
         pane = found.get("pane", None)
         if pane is None:
             raise exc.CTLMUX_TMUXPaneFormatInvalid(
@@ -293,13 +351,8 @@ class WindowsTree:
             raise exc.CTLMUX_TMUXPaneFormatInvalid(
                 "list-panes `pane` must be index:title"
             )
-        pane_id, pane_title = split_pane
-        pane_int = int(pane_id) or None
 
-        if not pane_int:
-            raise exc.CTLMUX_TMUXPaneFormatInvalid(
-                "list-panes `pane` must be index/id, convertable to int"
-            )
+        pane_index, pane_title = split_pane
 
         command: str | None = found.get("command", None)
         path: str | None = found.get("path", None)
@@ -312,10 +365,10 @@ class WindowsTree:
 
         found["_window_name"] = name
         found["_window_index"] = index
-        found["_pane_id"] = pane_id
+        found["_pane_index"] = pane_index
         found["_pane_title"] = pane_title
 
-        return found, pane_int
+        return found, pane_id_int
 
     @staticmethod
     def parse_tmux_window(fmt_ln: str) -> tuple[WindowInfo, int]:
