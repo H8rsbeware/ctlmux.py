@@ -142,11 +142,11 @@ class WindowsTree:
 
         for windex, data in winfo.items():
             layout: str | None = data.get("layout", None)
-            expected_panes = int(
+            expected_pane_count = int(
                 data.get("count", "")
             ) or None
 
-            if not layout or not expected_panes:
+            if not layout or not expected_pane_count:
                 raise exc.CTLMUX_TMUXWindowFormatInvalid(
                     "list-windows expects layout= and pane count"
                 )
@@ -157,7 +157,7 @@ class WindowsTree:
             # Walk tree with windex, get pane data, build new tree
             this_tl_pane: ResolvedArea = self.BuildTopPaneFromLayoutTree(
                 tree,
-                expected_panes,
+                expected_pane_count,
                 windex,
             )
 
@@ -175,7 +175,7 @@ class WindowsTree:
     def BuildTopPaneFromLayoutTree(
         self,
         layout_tree: lex.PaneArea,
-        expected_count: int,
+        expected_pane_count: int,
         index: int,
     ) -> ResolvedArea:
         panes_by_id = self.getPaneInfos(index)
@@ -225,10 +225,10 @@ class WindowsTree:
 
         area, count = walk(layout_tree, 0)
 
-        if expected_count != count:
+        if expected_pane_count != count:
             raise exc.CTLMUX_SystemError(
                 "BuildWindowFromLayoutTree child mismatch, Lex produced " +
-                f"`{expected_count}` children, walked {count}"
+                f"`{expected_pane_count}` children, walked {count}"
             )
 
         return area
